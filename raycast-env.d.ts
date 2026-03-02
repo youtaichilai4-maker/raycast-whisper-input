@@ -9,13 +9,11 @@
 
 type ExtensionPreferences = {
   /** Whisper Model - Choose the Whisper model size. Smaller = faster, larger = more accurate. */
-  "modelSize": "tiny" | "base" | "small",
+  "modelSize": "tiny" | "base" | "small" | "medium" | "large",
   /** Language - Recognition language */
   "language": "ja" | "en" | "auto",
   /** ffmpeg Path - Path to ffmpeg binary. Leave empty to auto-detect. */
-  "ffmpegPath": string,
-  /** Ollama Model - Ollama model for text refinement. Leave empty to disable. */
-  "ollamaModel": string
+  "ffmpegPath": string
 }
 
 /** Preferences accessible in all the extension's commands */

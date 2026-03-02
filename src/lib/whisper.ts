@@ -12,10 +12,12 @@ const MODEL_URLS: Record<string, string> = {
   tiny: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin`,
   base: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin`,
   small: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin`,
+  medium: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin`,
+  large: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin`,
 };
 
 interface Preferences {
-  modelSize: "tiny" | "base" | "small";
+  modelSize: "tiny" | "base" | "small" | "medium" | "large";
   language: string;
   ffmpegPath: string;
 }
@@ -30,13 +32,43 @@ function supportDir(): string {
   return dir;
 }
 
+const MODEL_FILENAMES: Record<string, string> = {
+  large: "ggml-large-v3-turbo.bin",
+  medium: "ggml-medium.bin",
+  small: "ggml-small.bin",
+  base: "ggml-base.bin",
+  tiny: "ggml-tiny.bin",
+};
+
+/** Returns the best available model: preference first, then largest downloaded. */
 export function modelPath(): string {
   const { modelSize } = getPreferenceValues<Preferences>();
-  return join(supportDir(), `ggml-${modelSize}.bin`);
+  const dir = supportDir();
+
+  // Use preference if that model exists
+  const preferredFile = MODEL_FILENAMES[modelSize] ?? `ggml-${modelSize}.bin`;
+  const preferredPath = join(dir, preferredFile);
+  if (existsSync(preferredPath)) return preferredPath;
+
+  // Fallback: use the best model that's actually downloaded
+  for (const file of Object.values(MODEL_FILENAMES)) {
+    const p = join(dir, file);
+    if (existsSync(p)) return p;
+  }
+
+  return preferredPath;
 }
 
 export function whisperBinPath(): string {
   return join(supportDir(), "whisper-cli");
+}
+
+export function whisperServerBinPath(): string {
+  return join(supportDir(), "whisper-server");
+}
+
+export function isWhisperServerInstalled(): boolean {
+  return existsSync(whisperServerBinPath());
 }
 
 export function isModelDownloaded(): boolean {
@@ -408,28 +440,135 @@ function createWavHeader(
 }
 
 // ---------------------------------------------------------------------------
-// Transcription
+// Whisper Server (persistent process — model stays in memory)
+// ---------------------------------------------------------------------------
+
+const WHISPER_SERVER_PORT = 18080;
+const WHISPER_SERVER_URL = `http://127.0.0.1:${WHISPER_SERVER_PORT}`;
+
+let serverProcess: ChildProcess | null = null;
+
+/** Start whisper-server if not already running. Model is loaded once. */
+export async function ensureWhisperServer(): Promise<void> {
+  // Already running?
+  if (await isServerHealthy()) return;
+
+  const serverBin = whisperServerBinPath();
+  const model = modelPath();
+  const { language } = getPreferenceValues<Preferences>();
+
+  if (!existsSync(serverBin)) throw new Error("whisper-server not found. Run Setup first.");
+  if (!existsSync(model)) throw new Error("Whisper model not found. Run Setup first.");
+
+  // Kill any stale process
+  stopWhisperServer();
+
+  serverProcess = spawn(serverBin, [
+    "-m", model,
+    "-l", language === "auto" ? "auto" : language,
+    "--port", String(WHISPER_SERVER_PORT),
+    "--no-timestamps",
+  ], {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+  });
+
+  serverProcess.unref();
+
+  // Wait for server to be ready (up to 30s for large model load)
+  const startTime = Date.now();
+  while (Date.now() - startTime < 30000) {
+    if (await isServerHealthy()) return;
+    await sleep(500);
+  }
+  throw new Error("Whisper server failed to start within 30s");
+}
+
+export function stopWhisperServer(): void {
+  if (serverProcess) {
+    serverProcess.kill("SIGTERM");
+    serverProcess = null;
+  }
+}
+
+async function isServerHealthy(): Promise<boolean> {
+  try {
+    const res = await fetch(`${WHISPER_SERVER_URL}/health`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ---------------------------------------------------------------------------
+// Transcription (via server HTTP API — fast, model already in memory)
 // ---------------------------------------------------------------------------
 
 export async function transcribe(audioPath: string): Promise<string> {
   const { language } = getPreferenceValues<Preferences>();
+
+  // Read WAV file
+  const { readFileSync } = await import("fs");
+  const wavData = readFileSync(audioPath);
+
+  // Build multipart form data manually (Node.js 18+ fetch)
+  const boundary = "----WhisperBoundary" + Date.now();
+  const langField = language === "auto" ? "auto" : language;
+
+  const parts: Buffer[] = [];
+  // file field
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n`
+  ));
+  parts.push(wavData);
+  parts.push(Buffer.from("\r\n"));
+  // response_format field
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\ntext\r\n`
+  ));
+  // language field
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\n${langField}\r\n`
+  ));
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+  const body = Buffer.concat(parts);
+
+  const res = await fetch(`${WHISPER_SERVER_URL}/inference`, {
+    method: "POST",
+    headers: {
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  if (!res.ok) {
+    // Fallback to CLI if server fails
+    return transcribeCli(audioPath);
+  }
+
+  const text = await res.text();
+  return text.trim();
+}
+
+/** Fallback: CLI-based transcription (slow but reliable) */
+async function transcribeCli(audioPath: string): Promise<string> {
+  const { language } = getPreferenceValues<Preferences>();
   const bin = whisperBinPath();
   const model = modelPath();
-
-  if (!existsSync(bin)) throw new Error("whisper-cli not found. Run Setup first.");
-  if (!existsSync(model)) throw new Error("Whisper model not found. Run Setup first.");
 
   return new Promise((resolve, reject) => {
     execFile(
       bin,
       [
-        "-m",
-        model,
-        "-f",
-        audioPath,
+        "-m", model,
+        "-f", audioPath,
         "--no-timestamps",
-        "-l",
-        language === "auto" ? "auto" : language,
+        "-l", language === "auto" ? "auto" : language,
         "--output-txt",
         "--no-prints",
       ],

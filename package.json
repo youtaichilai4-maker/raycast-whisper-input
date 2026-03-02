@@ -15,19 +15,27 @@
       "description": "Choose the Whisper model size. Smaller = faster, larger = more accurate.",
       "type": "dropdown",
       "required": false,
-      "default": "tiny",
+      "default": "large",
       "data": [
         {
           "title": "Tiny (~75MB, fastest)",
           "value": "tiny"
         },
         {
-          "title": "Base (~142MB, balanced)",
+          "title": "Base (~142MB)",
           "value": "base"
         },
         {
-          "title": "Small (~466MB, accurate)",
+          "title": "Small (~466MB, recommended)",
           "value": "small"
+        },
+        {
+          "title": "Medium (~1.5GB, high accuracy)",
+          "value": "medium"
+        },
+        {
+          "title": "Large v3 Turbo (~1.6GB, best)",
+          "value": "large"
         }
       ]
     },
@@ -60,14 +68,6 @@
       "type": "textfield",
       "required": false,
       "default": ""
-    },
-    {
-      "name": "ollamaModel",
-      "title": "Ollama Model",
-      "description": "Ollama model for text refinement. Leave empty to disable.",
-      "type": "textfield",
-      "required": false,
-      "default": "gemma3:4b"
     }
   ],
   "commands": [
