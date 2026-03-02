@@ -1,31 +1,31 @@
 # Whisper Voice Input for Raycast
 
-Real-time voice-to-text input using local Whisper. Speak and see text appear instantly, then paste it anywhere.
+ローカル Whisper を使ったリアルタイム音声テキスト入力。話すとその場で文字が表示され、どのアプリにもペーストできる。
 
-## Features
+## 特徴
 
-- Real-time transcription preview as you speak
-- Fully local & offline (no data sent to cloud)
-- Paste text at cursor position in any app
-- Japanese language support
-- Configurable Whisper model size (tiny/base/small)
+- 話しながらリアルタイムで文字起こしプレビュー
+- 完全ローカル・オフライン動作（音声データは外部送信なし）
+- 任意のアプリのカーソル位置にテキスト挿入
+- 日本語対応
+- Whisper モデルサイズ切り替え（tiny / base / small）
 
-## Prerequisites
+## 必要なもの
 
-- macOS (Apple Silicon recommended)
+- macOS（Apple Silicon 推奨）
 - [Raycast](https://raycast.com)
 - [ffmpeg](https://ffmpeg.org/) — `brew install ffmpeg`
-- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) — see build instructions below
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) — 下記ビルド手順参照
 
-## Setup
+## セットアップ
 
-### 1. Install ffmpeg
+### 1. ffmpeg をインストール
 
 ```bash
 brew install ffmpeg
 ```
 
-### 2. Build whisper-cli
+### 2. whisper-cli をビルド
 
 ```bash
 brew install cmake
@@ -34,56 +34,58 @@ cd whisper.cpp
 cmake -B build && cmake --build build --config Release
 ```
 
-### 3. Install the extension
+ビルド後、`build/bin/whisper-cli` が生成される。
+
+### 3. 拡張機能をインストール
 
 ```bash
-git clone https://github.com/yutaakase/raycast-whisper-input
+git clone https://github.com/youtaichilai4-maker/raycast-whisper-input
 cd raycast-whisper-input
 npm install
 npm run dev
 ```
 
-### 4. Run Setup command
+### 4. セットアップコマンドを実行
 
-Open Raycast and run **Setup Whisper** to:
-- Verify dependencies (ffmpeg, whisper-cli)
-- Download the Whisper model
-- Copy the whisper-cli binary to the extension's support directory
+Raycast を開いて **Setup Whisper** を実行:
+- 依存関係の確認（ffmpeg, whisper-cli）
+- whisper-cli バイナリの配置
+- Whisper モデルのダウンロード
 
-## Usage
+## 使い方
 
-1. Open Raycast
-2. Search for **Voice Input**
-3. Recording starts automatically
-4. Speak — text appears in real-time
-5. Press **Enter** to paste at cursor, or **Esc** to cancel
+1. Raycast を開く
+2. **Voice Input** を検索して実行
+3. 自動的に録音が開始される
+4. 話す — リアルタイムでテキストが表示される
+5. **Enter** でカーソル位置にペースト、**Esc** でキャンセル
 
-## Commands
+## コマンド一覧
 
-| Command | Description |
+| コマンド | 説明 |
 |---|---|
-| Voice Input | Start real-time voice input |
-| Setup Whisper | Download model and verify dependencies |
+| Voice Input | リアルタイム音声入力を開始 |
+| Setup Whisper | モデルダウンロードと依存関係の確認 |
 
-## Preferences
+## 設定項目
 
-| Setting | Description | Default |
+| 項目 | 説明 | デフォルト |
 |---|---|---|
-| Whisper Model | Model size (tiny/base/small) | tiny |
-| Language | Recognition language | Japanese |
-| ffmpeg Path | Custom ffmpeg path | Auto-detect |
+| Whisper Model | モデルサイズ（tiny/base/small） | tiny |
+| Language | 認識言語 | Japanese |
+| ffmpeg Path | ffmpeg のパス（空欄で自動検出） | 自動検出 |
 
-## Architecture
+## アーキテクチャ
 
 ```
-Microphone → ffmpeg (avfoundation, 16kHz mono)
-  → PCM buffer (Node.js)
-  → Flush every 3s → WAV file
-  → whisper-cli → transcribed text
-  → React state → live preview
+マイク → ffmpeg (avfoundation, 16kHz mono)
+  → PCM バッファ (Node.js)
+  → 3秒ごとに flush → WAV ファイル
+  → whisper-cli → テキスト
+  → React state → ライブプレビュー
   → Enter → Clipboard.paste()
 ```
 
-## License
+## ライセンス
 
 MIT

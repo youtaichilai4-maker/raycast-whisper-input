@@ -8,8 +8,6 @@ import { https } from "follow-redirects";
 // Constants
 // ---------------------------------------------------------------------------
 
-const WHISPER_REPO = "ggml-org/whisper.cpp";
-
 const MODEL_URLS: Record<string, string> = {
   tiny: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin`,
   base: `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin`,

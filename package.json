@@ -4,7 +4,9 @@
   "description": "Real-time voice-to-text input using local Whisper. Speak and see text appear instantly, then paste it anywhere.",
   "icon": "icon.png",
   "author": "yutaakase",
-  "categories": ["Productivity"],
+  "categories": [
+    "Productivity"
+  ],
   "license": "MIT",
   "preferences": [
     {
@@ -15,9 +17,18 @@
       "required": false,
       "default": "tiny",
       "data": [
-        { "title": "Tiny (~75MB, fastest)", "value": "tiny" },
-        { "title": "Base (~142MB, balanced)", "value": "base" },
-        { "title": "Small (~466MB, accurate)", "value": "small" }
+        {
+          "title": "Tiny (~75MB, fastest)",
+          "value": "tiny"
+        },
+        {
+          "title": "Base (~142MB, balanced)",
+          "value": "base"
+        },
+        {
+          "title": "Small (~466MB, accurate)",
+          "value": "small"
+        }
       ]
     },
     {
@@ -28,9 +39,18 @@
       "required": false,
       "default": "ja",
       "data": [
-        { "title": "Japanese", "value": "ja" },
-        { "title": "English", "value": "en" },
-        { "title": "Auto-detect", "value": "auto" }
+        {
+          "title": "Japanese",
+          "value": "ja"
+        },
+        {
+          "title": "English",
+          "value": "en"
+        },
+        {
+          "title": "Auto-detect",
+          "value": "auto"
+        }
       ]
     },
     {
@@ -60,10 +80,12 @@
   ],
   "dependencies": {
     "@raycast/api": "^1.93.0",
-    "@raycast/utils": "^1.19.0"
+    "@raycast/utils": "^1.19.0",
+    "follow-redirects": "^1.15.11"
   },
   "devDependencies": {
     "@raycast/eslint-config": "^1.0.11",
+    "@types/follow-redirects": "^1.14.4",
     "@types/node": "22.13.10",
     "@types/react": "19.0.10",
     "eslint": "^8.57.0",
