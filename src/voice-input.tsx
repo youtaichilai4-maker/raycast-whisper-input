@@ -3,6 +3,7 @@ import {
   ActionPanel,
   Clipboard,
   Detail,
+  popToRoot,
   showHUD,
   showToast,
   Toast,
@@ -18,82 +19,70 @@ import {
 import { refineWithOllama, isOllamaAvailable } from "./lib/ollama";
 import { unlinkSync } from "fs";
 
-type State = "checking" | "ready" | "recording" | "error" | "setup-needed";
+type Phase = "checking" | "recording" | "done" | "error" | "setup-needed";
 
 export default function VoiceInput() {
-  const [state, setState] = useState<State>("checking");
+  const [phase, setPhase] = useState<Phase>("checking");
   const [transcript, setTranscript] = useState("");
   const [rawSegment, setRawSegment] = useState("");
   const [isRefining, setIsRefining] = useState(false);
+  const [useOllama, setUseOllama] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
   const recorderRef = useRef<VadRecorder | null>(null);
   const transcriptRef = useRef("");
-  const ollamaAvailable = useRef(false);
+  const useOllamaRef = useRef(false);
 
-  // Keep ref in sync with state for use in callbacks
-  useEffect(() => {
-    transcriptRef.current = transcript;
-  }, [transcript]);
+  // Keep refs in sync with state for use in callbacks
+  useEffect(() => { transcriptRef.current = transcript; }, [transcript]);
+  useEffect(() => { useOllamaRef.current = useOllama; }, [useOllama]);
 
   // ------------------------------------------------------------------
   // Check dependencies on mount
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!isWhisperInstalled() || !isModelDownloaded()) {
-      setState("setup-needed");
+      setPhase("setup-needed");
       return;
     }
-    ollamaAvailable.current = isOllamaAvailable();
-    setState("ready");
+    const hasOllama = isOllamaAvailable();
+    setUseOllama(hasOllama);
     startRecordingSession();
   }, []);
 
-  // ------------------------------------------------------------------
   // Cleanup on unmount
-  // ------------------------------------------------------------------
   useEffect(() => {
-    return () => {
-      stopRecordingSession();
-    };
+    return () => { stopRecordingSession(); };
   }, []);
 
   // ------------------------------------------------------------------
-  // Process a speech segment (Whisper → Ollama)
+  // Process a speech segment (Whisper → optional Ollama)
   // ------------------------------------------------------------------
   async function processSpeechSegment(wavPath: string) {
     try {
-      // Step 1: Whisper transcription
       const rawText = await transcribe(wavPath);
-
-      // Clean up temp file
       try { unlinkSync(wavPath); } catch { /* ignore */ }
-
       if (!rawText) return;
 
-      // Show raw result immediately
       setRawSegment(rawText);
 
-      // Step 2: Ollama refinement (if available)
       let finalText = rawText;
-      if (ollamaAvailable.current) {
+      if (useOllamaRef.current) {
         setIsRefining(true);
         finalText = await refineWithOllama(rawText, transcriptRef.current);
         setIsRefining(false);
       }
 
-      // Append to transcript
       setTranscript((prev) => prev + (prev ? "" : "") + finalText);
       setRawSegment("");
     } catch (err) {
       console.error("Processing error:", err);
-      // Clean up on error too
       try { unlinkSync(wavPath); } catch { /* ignore */ }
     }
   }
 
   // ------------------------------------------------------------------
-  // Recording session management
+  // Recording session
   // ------------------------------------------------------------------
   async function startRecordingSession() {
     try {
@@ -101,9 +90,9 @@ export default function VoiceInput() {
         processSpeechSegment(wavPath);
       });
       recorderRef.current = recorder;
-      setState("recording");
+      setPhase("recording");
     } catch (err) {
-      setState("error");
+      setPhase("error");
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   }
@@ -116,10 +105,9 @@ export default function VoiceInput() {
   }
 
   // ------------------------------------------------------------------
-  // Actions
+  // Enter → 録音終了して確定画面へ
   // ------------------------------------------------------------------
-  async function handlePaste() {
-    // Flush any remaining audio before pasting
+  async function handleFinishRecording() {
     if (recorderRef.current) {
       const lastWav = await recorderRef.current.flush();
       if (lastWav) {
@@ -127,7 +115,13 @@ export default function VoiceInput() {
       }
     }
     stopRecordingSession();
+    setPhase("done");
+  }
 
+  // ------------------------------------------------------------------
+  // 確定画面のアクション
+  // ------------------------------------------------------------------
+  async function handlePaste() {
     const text = transcript.trim();
     if (!text) {
       await showHUD("テキストがありません");
@@ -135,6 +129,7 @@ export default function VoiceInput() {
     }
     await Clipboard.paste(text);
     await showHUD("ペーストしました");
+    popToRoot();
   }
 
   async function handleCopy() {
@@ -145,6 +140,7 @@ export default function VoiceInput() {
     }
     await Clipboard.copy(text);
     await showHUD("コピーしました");
+    popToRoot();
   }
 
   function handleClear() {
@@ -152,10 +148,14 @@ export default function VoiceInput() {
     setRawSegment("");
   }
 
+  function handleToggleOllama() {
+    setUseOllama((prev) => !prev);
+  }
+
   // ------------------------------------------------------------------
-  // Render
+  // Render: セットアップ / エラー
   // ------------------------------------------------------------------
-  if (state === "setup-needed") {
+  if (phase === "setup-needed") {
     return (
       <Detail
         markdown={
@@ -167,27 +167,51 @@ export default function VoiceInput() {
     );
   }
 
-  if (state === "error") {
+  if (phase === "error") {
+    return <Detail markdown={`# エラー\n\n\`\`\`\n${errorMsg}\n\`\`\``} />;
+  }
+
+  // ------------------------------------------------------------------
+  // Render: 確定画面（録音終了後）
+  // ------------------------------------------------------------------
+  if (phase === "done") {
+    const doneMarkdown = [
+      "# 録音完了",
+      "---",
+      transcript || "_テキストがありません_",
+    ].join("\n\n");
+
     return (
-      <Detail markdown={`# エラー\n\n\`\`\`\n${errorMsg}\n\`\`\``} />
+      <Detail
+        markdown={doneMarkdown}
+        actions={
+          <ActionPanel>
+            <Action
+              title="カーソル位置にペースト"
+              shortcut={{ modifiers: [], key: "return" }}
+              onAction={handlePaste}
+            />
+            <Action
+              title="クリップボードにコピー"
+              shortcut={{ modifiers: ["cmd"], key: "c" }}
+              onAction={handleCopy}
+            />
+          </ActionPanel>
+        }
+      />
     );
   }
 
-  const statusIcon = state === "recording" ? "🎙" : "⏳";
-  const statusLabel =
-    state === "recording"
-      ? "録音中... 話してください"
-      : state === "ready"
-        ? "起動中..."
-        : "確認中...";
-
-  const ollamaStatus = ollamaAvailable.current ? "✅ Ollama" : "⚠️ Ollama なし（生テキスト）";
+  // ------------------------------------------------------------------
+  // Render: 録音中
+  // ------------------------------------------------------------------
+  const ollamaLabel = useOllama ? "✅ Ollama ON" : "⚫ Ollama OFF";
   const refiningLabel = isRefining ? "\n\n_🔄 テキスト校正中..._" : "";
   const rawLabel = rawSegment && !isRefining ? `\n\n> 📝 ${rawSegment}` : "";
 
   const markdown = [
-    `# ${statusIcon} ${statusLabel}`,
-    `_${ollamaStatus} | VAD モード_`,
+    "# 🎙 録音中... 話してください",
+    `_${ollamaLabel} | VAD モード | Enter で終了_`,
     "---",
     transcript || "_音声を待っています..._",
     rawLabel,
@@ -200,14 +224,14 @@ export default function VoiceInput() {
       actions={
         <ActionPanel>
           <Action
-            title="カーソル位置にペースト"
+            title="録音を終了"
             shortcut={{ modifiers: [], key: "return" }}
-            onAction={handlePaste}
+            onAction={handleFinishRecording}
           />
           <Action
-            title="クリップボードにコピー"
-            shortcut={{ modifiers: ["cmd"], key: "c" }}
-            onAction={handleCopy}
+            title={useOllama ? "Ollama OFF にする" : "Ollama ON にする"}
+            shortcut={{ modifiers: ["cmd"], key: "o" }}
+            onAction={handleToggleOllama}
           />
           <Action
             title="クリア"
