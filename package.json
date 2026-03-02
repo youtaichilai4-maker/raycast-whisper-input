@@ -60,6 +60,14 @@
       "type": "textfield",
       "required": false,
       "default": ""
+    },
+    {
+      "name": "ollamaModel",
+      "title": "Ollama Model",
+      "description": "Ollama model for text refinement. Leave empty to disable.",
+      "type": "textfield",
+      "required": false,
+      "default": "gemma3:4b"
     }
   ],
   "commands": [

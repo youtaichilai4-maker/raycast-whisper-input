@@ -16,12 +16,14 @@ import {
   modelPath,
   whisperBinPath,
 } from "./lib/whisper";
+import { isOllamaAvailable } from "./lib/ollama";
 
 interface SetupStatus {
   ffmpeg: "checking" | "ok" | "missing";
   ffmpegPath: string;
   whisperBin: "checking" | "ok" | "missing";
   model: "checking" | "ok" | "missing" | "downloading";
+  ollama: "checking" | "ok" | "missing";
   modelProgress: number;
   error: string;
 }
@@ -32,6 +34,7 @@ export default function Setup() {
     ffmpegPath: "",
     whisperBin: "checking",
     model: "checking",
+    ollama: "checking",
     modelProgress: 0,
     error: "",
   });
@@ -59,6 +62,12 @@ export default function Setup() {
     setStatus((s) => ({
       ...s,
       model: isModelDownloaded() ? "ok" : "missing",
+    }));
+
+    // Check Ollama
+    setStatus((s) => ({
+      ...s,
+      ollama: isOllamaAvailable() ? "ok" : "missing",
     }));
   }
 
@@ -112,6 +121,7 @@ export default function Setup() {
 | ffmpeg | ${icon(status.ffmpeg)} ${status.ffmpeg} | ${status.ffmpeg === "ok" ? status.ffmpegPath : "Install: \`brew install ffmpeg\`"} |
 | whisper-cli | ${icon(status.whisperBin)} ${status.whisperBin} | ${status.whisperBin === "ok" ? whisperBinPath() : "See build instructions below"} |
 | Whisper Model | ${icon(status.model)} ${status.model === "downloading" ? `downloading (${status.modelProgress}%)` : status.model} | ${status.model === "ok" ? modelPath() : "Click Download Model below"} |
+| Ollama | ${icon(status.ollama)} ${status.ollama} | ${status.ollama === "ok" ? "テキスト校正に使用" : "任意: \`brew install ollama\` → \`ollama pull gemma3:4b\`"} |
 
 ${
   status.whisperBin === "missing"
@@ -141,7 +151,7 @@ brew install ffmpeg
 
 ${status.error ? `## Error\n\n\`\`\`\n${status.error}\n\`\`\`` : ""}
 
-${status.ffmpeg === "ok" && status.whisperBin === "ok" && status.model === "ok" ? "## ✅ All Ready!\n\nYou can now use **Voice Input** command." : ""}
+${status.ffmpeg === "ok" && status.whisperBin === "ok" && status.model === "ok" ? `## ✅ 準備完了!\n\n**Voice Input** コマンドが使えます。${status.ollama === "ok" ? "\n\nOllama によるテキスト校正が有効です。" : "\n\n⚠️ Ollama が未インストールのため、テキスト校正なしで動作します。"}` : ""}
 `;
 
   return (

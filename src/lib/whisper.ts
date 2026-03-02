@@ -184,24 +184,155 @@ export async function startRecording(): Promise<Recorder> {
 }
 
 // ---------------------------------------------------------------------------
-// Chunked recording for real-time transcription
+// VAD-based recording for real-time transcription
 // ---------------------------------------------------------------------------
 
-export interface ChunkedRecorder {
+export interface VadRecorder {
   process: ChildProcess;
-  /** Flush current audio buffer to a WAV file and return its path */
+  /** Force flush current buffer (e.g. on stop). Returns "" if empty. */
   flush: () => Promise<string>;
   /** Stop recording entirely */
   stop: () => void;
 }
 
+// VAD parameters
+const SAMPLE_RATE = 16000;
+const BYTES_PER_SAMPLE = 2; // s16le
+/** RMS threshold to consider "speech" (0-32768 range). Adjust if needed. */
+const SPEECH_THRESHOLD = 500;
+/** How many ms of silence before we consider speech ended */
+const SILENCE_DURATION_MS = 800;
+/** Minimum speech duration to bother transcribing (ms) */
+const MIN_SPEECH_MS = 500;
+/** Maximum buffer duration before forced flush (ms) — prevents infinite accumulation */
+const MAX_BUFFER_MS = 30000;
+/** How often to check VAD state (ms) */
+const VAD_CHECK_INTERVAL_MS = 100;
+
 /**
- * Start recording in chunks. Every time flush() is called, the current
- * audio segment is saved and a new segment begins.
+ * Start VAD-based recording. Instead of fixed intervals, this monitors
+ * audio energy and flushes when a pause in speech is detected.
  *
- * This streams raw PCM from ffmpeg's stdout. When flushed, the accumulated
- * buffer is written to a WAV file for Whisper to consume.
+ * onSpeechEnd is called with the WAV file path whenever a speech segment ends.
  */
+export async function startVadRecording(
+  onSpeechEnd: (wavPath: string) => void,
+): Promise<VadRecorder> {
+  const ffmpeg = await findFfmpeg();
+  if (!ffmpeg) throw new Error("ffmpeg not found. Install via: brew install ffmpeg");
+
+  let speechBuffer = Buffer.alloc(0);
+  let isSpeaking = false;
+  let silenceSince = 0;
+  let chunkIndex = 0;
+  let lastDataTime = Date.now();
+
+  // Stream raw PCM to stdout
+  const proc = spawn(ffmpeg, [
+    "-f", "avfoundation",
+    "-i", ":default",
+    "-ar", String(SAMPLE_RATE),
+    "-ac", "1",
+    "-f", "s16le",
+    "-acodec", "pcm_s16le",
+    "pipe:1",
+  ], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  proc.stdout?.on("data", (chunk: Buffer) => {
+    speechBuffer = Buffer.concat([speechBuffer, chunk]);
+    lastDataTime = Date.now();
+  });
+
+  function calculateRms(pcm: Buffer): number {
+    if (pcm.length < BYTES_PER_SAMPLE) return 0;
+    let sumSq = 0;
+    const samples = pcm.length / BYTES_PER_SAMPLE;
+    for (let i = 0; i < pcm.length; i += BYTES_PER_SAMPLE) {
+      const sample = pcm.readInt16LE(i);
+      sumSq += sample * sample;
+    }
+    return Math.sqrt(sumSq / samples);
+  }
+
+  function bufferDurationMs(): number {
+    return (speechBuffer.length / BYTES_PER_SAMPLE / SAMPLE_RATE) * 1000;
+  }
+
+  async function flushBuffer(): Promise<string> {
+    const pcmData = speechBuffer;
+    speechBuffer = Buffer.alloc(0);
+    isSpeaking = false;
+    silenceSince = 0;
+
+    if (pcmData.length === 0) return "";
+    if (bufferDurationMsFor(pcmData) < MIN_SPEECH_MS) return "";
+
+    chunkIndex++;
+    const wavPath = join(supportDir(), `chunk-${chunkIndex}.wav`);
+    const wavHeader = createWavHeader(pcmData.length, SAMPLE_RATE, 1, 16);
+    const wavBuffer = Buffer.concat([wavHeader, pcmData]);
+
+    const { writeFileSync } = await import("fs");
+    writeFileSync(wavPath, wavBuffer);
+    return wavPath;
+  }
+
+  function bufferDurationMsFor(buf: Buffer): number {
+    return (buf.length / BYTES_PER_SAMPLE / SAMPLE_RATE) * 1000;
+  }
+
+  // VAD check loop
+  const vadInterval = setInterval(() => {
+    // Analyze the most recent ~100ms of audio for energy
+    const recentBytes = SAMPLE_RATE * BYTES_PER_SAMPLE * (VAD_CHECK_INTERVAL_MS / 1000);
+    const recentStart = Math.max(0, speechBuffer.length - recentBytes);
+    const recentChunk = speechBuffer.subarray(recentStart);
+    const rms = calculateRms(recentChunk);
+
+    const now = Date.now();
+
+    if (rms >= SPEECH_THRESHOLD) {
+      isSpeaking = true;
+      silenceSince = 0;
+    } else if (isSpeaking) {
+      if (silenceSince === 0) {
+        silenceSince = now;
+      } else if (now - silenceSince >= SILENCE_DURATION_MS) {
+        // Speech ended — flush
+        flushBuffer().then((wavPath) => {
+          if (wavPath) onSpeechEnd(wavPath);
+        });
+      }
+    }
+
+    // Force flush if buffer is too long
+    if (bufferDurationMs() >= MAX_BUFFER_MS && isSpeaking) {
+      flushBuffer().then((wavPath) => {
+        if (wavPath) onSpeechEnd(wavPath);
+      });
+    }
+  }, VAD_CHECK_INTERVAL_MS);
+
+  return {
+    process: proc,
+    flush: flushBuffer,
+    stop: () => {
+      clearInterval(vadInterval);
+      proc.stdin?.write("q");
+      proc.kill("SIGTERM");
+    },
+  };
+}
+
+// Keep the old chunked recorder for fallback
+export interface ChunkedRecorder {
+  process: ChildProcess;
+  flush: () => Promise<string>;
+  stop: () => void;
+}
+
 export async function startChunkedRecording(): Promise<ChunkedRecorder> {
   const ffmpeg = await findFfmpeg();
   if (!ffmpeg) throw new Error("ffmpeg not found. Install via: brew install ffmpeg");
@@ -209,20 +340,13 @@ export async function startChunkedRecording(): Promise<ChunkedRecorder> {
   let buffer = Buffer.alloc(0);
   let chunkIndex = 0;
 
-  // Stream raw PCM to stdout
   const proc = spawn(ffmpeg, [
-    "-f",
-    "avfoundation",
-    "-i",
-    ":default",
-    "-ar",
-    "16000",
-    "-ac",
-    "1",
-    "-f",
-    "s16le",
-    "-acodec",
-    "pcm_s16le",
+    "-f", "avfoundation",
+    "-i", ":default",
+    "-ar", "16000",
+    "-ac", "1",
+    "-f", "s16le",
+    "-acodec", "pcm_s16le",
     "pipe:1",
   ], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -241,7 +365,6 @@ export async function startChunkedRecording(): Promise<ChunkedRecorder> {
 
       if (pcmData.length === 0) return "";
 
-      // Write WAV file with proper header
       const wavPath = join(supportDir(), `chunk-${chunkIndex}.wav`);
       const wavHeader = createWavHeader(pcmData.length, 16000, 1, 16);
       const wavBuffer = Buffer.concat([wavHeader, pcmData]);

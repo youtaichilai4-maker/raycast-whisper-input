@@ -9,28 +9,32 @@ import {
 } from "@raycast/api";
 import { useEffect, useRef, useState } from "react";
 import {
-  ChunkedRecorder,
+  VadRecorder,
   isModelDownloaded,
   isWhisperInstalled,
-  startChunkedRecording,
+  startVadRecording,
   transcribe,
 } from "./lib/whisper";
+import { refineWithOllama, isOllamaAvailable } from "./lib/ollama";
 import { unlinkSync } from "fs";
-
-// How often to flush audio buffer and transcribe (ms)
-const FLUSH_INTERVAL_MS = 3000;
 
 type State = "checking" | "ready" | "recording" | "error" | "setup-needed";
 
 export default function VoiceInput() {
   const [state, setState] = useState<State>("checking");
   const [transcript, setTranscript] = useState("");
-  const [partialText, setPartialText] = useState("");
+  const [rawSegment, setRawSegment] = useState("");
+  const [isRefining, setIsRefining] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const recorderRef = useRef<ChunkedRecorder | null>(null);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const isTranscribingRef = useRef(false);
+  const recorderRef = useRef<VadRecorder | null>(null);
+  const transcriptRef = useRef("");
+  const ollamaAvailable = useRef(false);
+
+  // Keep ref in sync with state for use in callbacks
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
 
   // ------------------------------------------------------------------
   // Check dependencies on mount
@@ -40,8 +44,8 @@ export default function VoiceInput() {
       setState("setup-needed");
       return;
     }
+    ollamaAvailable.current = isOllamaAvailable();
     setState("ready");
-    // Auto-start recording
     startRecordingSession();
   }, []);
 
@@ -55,44 +59,49 @@ export default function VoiceInput() {
   }, []);
 
   // ------------------------------------------------------------------
+  // Process a speech segment (Whisper → Ollama)
+  // ------------------------------------------------------------------
+  async function processSpeechSegment(wavPath: string) {
+    try {
+      // Step 1: Whisper transcription
+      const rawText = await transcribe(wavPath);
+
+      // Clean up temp file
+      try { unlinkSync(wavPath); } catch { /* ignore */ }
+
+      if (!rawText) return;
+
+      // Show raw result immediately
+      setRawSegment(rawText);
+
+      // Step 2: Ollama refinement (if available)
+      let finalText = rawText;
+      if (ollamaAvailable.current) {
+        setIsRefining(true);
+        finalText = await refineWithOllama(rawText, transcriptRef.current);
+        setIsRefining(false);
+      }
+
+      // Append to transcript
+      setTranscript((prev) => prev + (prev ? "" : "") + finalText);
+      setRawSegment("");
+    } catch (err) {
+      console.error("Processing error:", err);
+      // Clean up on error too
+      try { unlinkSync(wavPath); } catch { /* ignore */ }
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Recording session management
   // ------------------------------------------------------------------
   async function startRecordingSession() {
     try {
-      const recorder = await startChunkedRecording();
+      const recorder = await startVadRecording((wavPath) => {
+        processSpeechSegment(wavPath);
+      });
       recorderRef.current = recorder;
       setState("recording");
-
-      // Periodically flush and transcribe
-      intervalRef.current = setInterval(async () => {
-        if (isTranscribingRef.current) return;
-        isTranscribingRef.current = true;
-
-        try {
-          const wavPath = await recorder.flush();
-          if (!wavPath) {
-            isTranscribingRef.current = false;
-            return;
-          }
-
-          const text = await transcribe(wavPath);
-          if (text) {
-            setTranscript((prev) => prev + (prev ? " " : "") + text);
-            setPartialText("");
-          }
-
-          // Clean up temp file
-          try {
-            unlinkSync(wavPath);
-          } catch {
-            // ignore
-          }
-        } catch (err) {
-          console.error("Transcription error:", err);
-        } finally {
-          isTranscribingRef.current = false;
-        }
-      }, FLUSH_INTERVAL_MS);
     } catch (err) {
       setState("error");
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -100,10 +109,6 @@ export default function VoiceInput() {
   }
 
   function stopRecordingSession() {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
     if (recorderRef.current) {
       recorderRef.current.stop();
       recorderRef.current = null;
@@ -114,29 +119,37 @@ export default function VoiceInput() {
   // Actions
   // ------------------------------------------------------------------
   async function handlePaste() {
+    // Flush any remaining audio before pasting
+    if (recorderRef.current) {
+      const lastWav = await recorderRef.current.flush();
+      if (lastWav) {
+        await processSpeechSegment(lastWav);
+      }
+    }
     stopRecordingSession();
+
     const text = transcript.trim();
     if (!text) {
-      await showHUD("No text to paste");
+      await showHUD("テキストがありません");
       return;
     }
     await Clipboard.paste(text);
-    await showHUD("Pasted!");
+    await showHUD("ペーストしました");
   }
 
   async function handleCopy() {
     const text = transcript.trim();
     if (!text) {
-      await showToast({ style: Toast.Style.Failure, title: "No text to copy" });
+      await showToast({ style: Toast.Style.Failure, title: "テキストがありません" });
       return;
     }
     await Clipboard.copy(text);
-    await showHUD("Copied!");
+    await showHUD("コピーしました");
   }
 
   function handleClear() {
     setTranscript("");
-    setPartialText("");
+    setRawSegment("");
   }
 
   // ------------------------------------------------------------------
@@ -146,9 +159,9 @@ export default function VoiceInput() {
     return (
       <Detail
         markdown={
-          "# Setup Required\n\n" +
-          "Whisper model or binary not found.\n\n" +
-          "Please run the **Setup Whisper** command first."
+          "# セットアップが必要です\n\n" +
+          "Whisper モデルまたはバイナリが見つかりません。\n\n" +
+          "**Setup Whisper** コマンドを先に実行してください。"
         }
       />
     );
@@ -156,22 +169,30 @@ export default function VoiceInput() {
 
   if (state === "error") {
     return (
-      <Detail
-        markdown={`# Error\n\n\`\`\`\n${errorMsg}\n\`\`\``}
-      />
+      <Detail markdown={`# エラー\n\n\`\`\`\n${errorMsg}\n\`\`\``} />
     );
   }
 
-  const displayText = transcript + (partialText ? ` _${partialText}_` : "");
   const statusIcon = state === "recording" ? "🎙" : "⏳";
   const statusLabel =
     state === "recording"
-      ? "Recording... Speak now."
+      ? "録音中... 話してください"
       : state === "ready"
-        ? "Starting..."
-        : "Checking...";
+        ? "起動中..."
+        : "確認中...";
 
-  const markdown = `# ${statusIcon} ${statusLabel}\n\n---\n\n${displayText || "_Waiting for speech..._"}`;
+  const ollamaStatus = ollamaAvailable.current ? "✅ Ollama" : "⚠️ Ollama なし（生テキスト）";
+  const refiningLabel = isRefining ? "\n\n_🔄 テキスト校正中..._" : "";
+  const rawLabel = rawSegment && !isRefining ? `\n\n> 📝 ${rawSegment}` : "";
+
+  const markdown = [
+    `# ${statusIcon} ${statusLabel}`,
+    `_${ollamaStatus} | VAD モード_`,
+    "---",
+    transcript || "_音声を待っています..._",
+    rawLabel,
+    refiningLabel,
+  ].join("\n\n");
 
   return (
     <Detail
@@ -179,17 +200,17 @@ export default function VoiceInput() {
       actions={
         <ActionPanel>
           <Action
-            title="Paste at Cursor"
+            title="カーソル位置にペースト"
             shortcut={{ modifiers: [], key: "return" }}
             onAction={handlePaste}
           />
           <Action
-            title="Copy to Clipboard"
+            title="クリップボードにコピー"
             shortcut={{ modifiers: ["cmd"], key: "c" }}
             onAction={handleCopy}
           />
           <Action
-            title="Clear"
+            title="クリア"
             shortcut={{ modifiers: ["cmd"], key: "k" }}
             onAction={handleClear}
           />
